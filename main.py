@@ -2,7 +2,7 @@ from headerScan import HeaderScanner
 from headerParser import HeaderParser
 from TypeResolver import TypeResolver
 from InterfaceGenerator import InterfaceGenerator
-#from FakeHeaderGenerator import FakeHeaderGenerator
+from FakeHeaderGenerator import FakeHeaderGenerator
 from MockGenerator import MockGenerator
 from TestInjectionGenerator import TestInjectionGenerator
 from CppAnalyzer import CppAnalyzer
@@ -18,9 +18,7 @@ def load_config(path):
     with open(path) as f:
         return json.load(f)
 
-
-if __name__ == "__main__":
-    config = load_config("config.json")
+def getAllHeaders():
 
     # ✅ Step 1: Header sammeln
     scanner = HeaderScanner(
@@ -47,7 +45,14 @@ if __name__ == "__main__":
         header_map,
         config["root_header"]
     )
+    return header_map
 
+
+if __name__ == "__main__":
+    config = load_config("config.json")
+
+    header_map = {}
+    header_map = getAllHeaders()
 
     # ✅ Resolver
     all_classes = []
@@ -64,6 +69,7 @@ if __name__ == "__main__":
 
 
 
+def foo():
     append_list = []
     base_output = "generated"
     types_path = os.path.join(base_output, "GeneratedTypes.h")
@@ -197,5 +203,4 @@ if __name__ == "__main__":
            # print(f"✅ Interface: {iface_path}")
             print(f"✅ Fake:      {fake_path}")
             #print(f"✅ Mock:      {mock_path}")
-    
  
