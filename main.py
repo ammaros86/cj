@@ -2,7 +2,7 @@ from headerScan import HeaderScanner
 from headerParser import HeaderParser
 from TypeResolver import TypeResolver
 from InterfaceGenerator import InterfaceGenerator
-from FakeHeaderGenerator import FakeHeaderGenerator
+#from FakeHeaderGenerator import FakeHeaderGenerator
 from MockGenerator import MockGenerator
 from TestInjectionGenerator import TestInjectionGenerator
 from CppAnalyzer import CppAnalyzer
