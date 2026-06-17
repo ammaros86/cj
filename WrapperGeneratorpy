@@ -1,0 +1,52 @@
+class WrapperGenerator:
+    def __init__(self, type_resolver):
+        self.tr = type_resolver
+
+    def generate(self, cls):
+        lines = []
+
+        name = cls["name"]
+
+        lines.append("#pragma once")
+        lines.append(f'#include "I{name}.h"')
+        lines.append(f'#include "{name}.h"\n')
+
+        lines.append(f"class {name}Wrapper : public I{name} {{")
+        lines.append("public:")
+
+        for m in cls["methods"]:
+
+            # ✅ getInstance ignorieren
+            if m["original_name"] == "getInstance":
+                continue
+
+            print(f"👉 Wrapper method: {m['original_name']}")
+
+            ret = self.tr.map_type(m["return"])
+
+            params = []
+            calls = []
+
+            for ptype, pname in m["params"]:
+                mapped = self.tr.map_type(ptype)
+
+                params.append(f"{mapped} {pname}")
+                calls.append(f"static_cast<{ptype}>({pname})")
+
+            lines.append(
+                f"    {ret} {m['name']}({', '.join(params)}) override {{"
+            )
+
+            call_expr = f"{name}::getInstance()->{m['original_name']}({', '.join(calls)})"
+
+            if ret != "void":
+                lines.append(f"        return {call_expr};")
+            else:
+                lines.append(f"        {call_expr};")
+
+            lines.append("    }\n")
+
+        # ❌ impl entfernen!
+        lines.append("};")
+
+        return "\n".join(lines)
