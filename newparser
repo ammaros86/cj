@@ -1,0 +1,173 @@
+pip install CppHeaderParser
+import os
+import json
+import CppHeaderParser
+
+class ClassDef:
+    def __init__(self, name):
+        self.name = name
+        self.methods = []
+        self.inner_classes = []  # CppHeaderParser unterstützt verschachtelte Klassen!
+
+    def to_dict(self):
+        return {
+            "name": self.name,
+            "methods": [
+                {
+                    "name": m.name,
+                    "original_name": m.original_name,
+                    "return": m.ret,
+                    "params": m.params
+                }
+                for m in self.methods
+            ],
+            "inner_classes": [inner.to_dict() for inner in self.inner_classes]
+        }
+
+class Method:
+    def __init__(self, ret, name, original_name, params):
+        self.ret = ret
+        self.name = name
+        self.original_name = original_name
+        self.params = params  # Format: [("int", "value"), ("CustomClass*", "ptr")]
+
+class HeaderParser:
+    def __init__(self, filepath):
+        self.filepath = filepath
+
+    def _normalize_type(self, ptype):
+        ptype = ptype.replace("const", "").replace("&", "")
+        ptype = ptype.replace("*", "ptr").strip()
+        
+        if "::" in ptype:
+            ptype = ptype.split("::")[-1]
+        if "=" in ptype:
+            ptype = ptype.split("=")[-1]
+            
+        return ptype.strip().replace(" ", "_")
+
+    def _build_suffix(self, params):
+        if not params:
+            return "void"
+        return "_".join([self._normalize_type(ptype) for ptype, _ in params])
+
+    def resolve_overloads(self, cls):
+        name_map = {}
+        for m in cls.methods:
+            name_map.setdefault(m.name, []).append(m)
+
+        new_methods = []
+        for name, methods in name_map.items():
+            if len(methods) == 1:
+                new_methods.append(methods[0])
+                continue
+
+            # Konflikt auflösen (Überladungen)
+            for m in methods:
+                suffix = self._build_suffix(m.params)
+                m.name = f"{m.name}_{suffix}"
+                new_methods.append(m)
+                
+        cls.methods = new_methods
+
+    def _convert_class(self, cpp_class_name, cpp_class_data):
+        """Konvertiert die CppHeaderParser-Struktur in deine ClassDef-Objekte"""
+        cls = ClassDef(cpp_class_name)
+
+        # Nur 'public' Methoden extrahieren (wie in deinem alten Parser)
+        public_methods = cpp_class_data["methods"]["public"]
+        
+        for m in public_methods:
+            # Konstruktoren/Destruktoren haben oft keinen echten Rückgabetyp im Parser
+            if m.get("constructor") or m.get("destructor"):
+                ret_type = "void" 
+            else:
+                ret_type = m.get("rtnType", "void")
+
+            name = m["name"]
+            
+            # Parameter in dein Format konvertieren: (Typ, Name)
+            parsed_params = []
+            for p in m["parameters"]:
+                # Falls ein Parameter keinen Namen hat (z.B. in abstrakten Interfaces: void func(int);)
+                p_name = p.get("name", "")
+                p_type = p.get("type", "void")
+                parsed_params.append((p_type, p_name))
+
+            cls.methods.append(Method(ret_type, name, name, parsed_params))
+
+        # Überladungen auflösen
+        self.resolve_overloads(cls)
+
+        # Rekursiv verschachtelte (inner) Klassen verarbeiten
+        nested_classes = cpp_class_data.get("nested_classes", {})
+        for inner_name, inner_data in nested_classes.items():
+            # CppHeaderParser speichert innere Klassen vollqualifiziert (z.B. Outer::Inner)
+            # Wir nehmen nur den echten Klassennamen
+            short_name = inner_name.split("::")[-1]
+            inner_cls = self._convert_class(short_name, inner_data)
+            cls.inner_classes.append(inner_cls)
+
+        return cls
+
+    def parse(self):
+        if not os.path.exists(self.filepath):
+            print(f"❌ Datei nicht gefunden: {self.filepath}")
+            return []
+
+        try:
+            # 1. CppHeaderParser liest die Datei und entfernt Kommentare automatisch
+            cpp_header = CppHeaderParser.CppHeader(self.filepath)
+            
+            classes = []
+            # 2. Durch alle gefundenen Klassen/Structs iterieren
+            for class_name, class_data in cpp_header.classes.items():
+                # Wenn es eine innere Klasse ist, wird sie weiter unten rekursiv erfasst, 
+                # wir überspringen sie hier auf der Hauptebene.
+                if "::" in class_name:
+                    continue
+                    
+                cls_def = self._convert_class(class_name, class_data)
+                classes.append(cls_def)
+                print("==> parse cls:", cls_def.name)
+
+            # 3. Direkt als Dictionary-Liste für deine JSON-Generierung zurückgeben
+            return [cls.to_dict() for cls in classes]
+
+        except CppHeaderParser.CppHeaderParseError as e:
+            print(f"❌ CppHeaderParser Fehler in {self.filepath}: {e}")
+            return []
+
+
+# ---------------------------------------------------------
+# Test-Ausführung
+# ---------------------------------------------------------
+if __name__ == "__main__":
+    test_file = "TestHeader.h"
+    with open(test_file, "w", encoding="utf-8") as f:
+        f.write("""
+        class MyClass {
+        public:
+            void setData(int value, const char* name);
+            int compute();
+            int compute(int factor); // Überladung!
+            
+            class InnerClass {
+            public:
+                void innerMethod(double x);
+            };
+            
+        private:
+            void secret(); // Wird ignoriert, da nicht public
+        };
+        """)
+
+    parser = HeaderParser(test_file)
+    result = parser.parse()
+    
+    # Ausgabe des erzeugten Dictionaries
+    print("\nAusgabe-JSON:")
+    print(json.dumps(result, indent=4))
+
+    if os.path.exists(test_file):
+        os.remove(test_file)
