@@ -1,0 +1,233 @@
+import os
+import re
+import CppHeaderParser
+
+
+class DependencyEngine:
+    def __init__(self, scanner, include_dirs):
+        self.scanner = scanner
+        self.include_dirs = include_dirs
+
+    # -----------------------------------------
+    # 1. Direct Includes
+    # -----------------------------------------
+    def get_direct_includes(self, root_header):
+        includes = self.scanner.extract_includes(root_header)
+
+        result = []
+        for inc in includes:
+            base = os.path.basename(inc)
+
+            if base and base[0].isupper():
+                result.append(base)
+
+        return result
+
+    # -----------------------------------------
+    # 2. Prüfen ob .cpp existiert
+    # -----------------------------------------
+    def has_cpp(self, header):
+        cpp_name = header.replace(".h", ".cpp")
+
+        # 🔥 global über Projekt scannen
+        for path in self.scanner.header_index.values():
+            dir_path = os.path.dirname(path)
+
+            candidate = os.path.join(dir_path, cpp_name)
+            if os.path.exists(candidate):
+                return True
+
+        return False
+
+
+    # -----------------------------------------
+    # 3. Prüfen ob Header weitere Header hat
+    # -----------------------------------------
+    def has_nested_headers(self, header):
+        path = self.scanner.header_index.get(header)
+        if not path:
+            return False
+
+        includes = self.scanner.extract_includes(path)
+
+        for inc in includes:
+            base = os.path.basename(inc)
+            if base and base[0].isupper():
+                return True
+
+        return False
+
+    # -----------------------------------------
+    # 4. Code lesen (ZEILENWEISE)
+    # -----------------------------------------
+    def read_lines(self, file_path):
+        if not os.path.exists(file_path):
+            return []
+
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.readlines()
+
+    # -----------------------------------------
+    # 5. Zeile → Header Mapping
+    # -----------------------------------------
+    def analyze_line_usage(self, lines, headers):
+        line_map = {}
+
+        for i, line in enumerate(lines):
+            used_headers = []
+
+            for header in headers:
+                base = header.replace(".h", "")
+
+                # Coucou::
+                if re.search(rf'\b{base}::', line):
+                    used_headers.append(header)
+
+                # Coucou obj;
+                if re.search(rf'\b{base}\s+\w+', line):
+                    used_headers.append(header)
+
+            # remove duplicates
+            used_headers = list(set(used_headers))
+
+            if used_headers:
+                line_map[i + 1] = {
+                    "line": line.strip(),
+                    "headers": used_headers
+                }
+
+        return line_map
+
+    # -----------------------------------------
+    # 6. User Typen erkennen (auch nested)
+    # -----------------------------------------
+    def detect_user_types(self, code):
+        matches = re.findall(r'(\w+(?:::\w+)+)', code)
+
+        result = {}
+
+        for m in matches:
+            parts = m.split("::")
+
+            root = parts[0]
+            nested = parts[1:]
+
+            result[root] = nested
+
+        return result
+
+    # -----------------------------------------
+    # 7. Strategy Entscheidung
+    # -----------------------------------------
+    def decide(self, header, used_headers):
+        if header[0].islower():
+            return "IGNORE"
+
+        exists_cpp = self.has_cpp(header)
+        has_nested = self.has_nested_headers(header)
+        is_used = header in used_headers
+
+        # ✅ NEU: class check PRO HEADER
+        cpp_has_class = self.header_cpp_has_class(header)
+
+        # -----------------------------------------
+        # KEEP (keine cpp / trivial)
+        # -----------------------------------------
+        if not exists_cpp:
+            if not has_nested:
+                return "KEEP"
+
+        # -----------------------------------------
+        # INTERFACE nur wenn HEADER eigenständige class hat
+        # -----------------------------------------
+        if is_used and cpp_has_class:
+            return "INTERFACE_WRAPPER"
+
+        # -----------------------------------------
+        # sonst fake
+        # -----------------------------------------
+        if is_used:
+            return "FAKE"
+
+        return "FAKE"
+
+    # -----------------------------------------
+    # 8. RUN
+    # -----------------------------------------
+    def run(self, root_header, cpp_file):
+        result = {}
+
+        headers = self.get_direct_includes(root_header)
+
+        cpp_lines = self.read_lines(cpp_file)
+        header_lines = self.read_lines(root_header)
+
+        cpp_map = self.analyze_line_usage(cpp_lines, headers)
+        header_map = self.analyze_line_usage(header_lines, headers)
+
+        used_headers = set()
+        for m in [cpp_map, header_map]:
+            for v in m.values():
+                used_headers.update(v["headers"])
+
+        # ✅ NEU
+        cpp_class_exists = self.header_cpp_has_class(cpp_file)
+
+        # -----------------------------------------
+        # Strategy Entscheidung
+        # -----------------------------------------
+        for h in headers:
+            result[h] = self.decide(h, used_headers)
+
+        # -----------------------------------------
+        # User Types
+        # -----------------------------------------
+        all_code = "".join(cpp_lines) + "\n" + "".join(header_lines)
+        user_types = self.detect_user_types(all_code)
+
+        for root_type, nested in user_types.items():
+            header_name = f"{root_type}.h"
+
+            if header_name not in result:
+                result[header_name] = {
+                    "strategy": "FAKE_TYPE",
+                    "structure": nested
+                }
+
+        return {
+            "strategies": result,
+            "cpp_line_map": cpp_map,
+            "header_line_map": header_map,
+            "user_types": user_types
+        }
+
+    
+    def header_cpp_has_class(self, header):
+        cpp_name = header.replace(".h", ".cpp")
+
+        # 🔍 global suchen basierend auf header_index
+        for path in self.scanner.header_index.values():
+            dir_path = os.path.dirname(path)
+            candidate = os.path.join(dir_path, cpp_name)
+
+            if os.path.exists(candidate):
+                with open(candidate, "r", encoding="utf-8", errors="ignore") as f:
+                    code = f.read()
+
+                # check: hat class
+                return bool(re.search(r'\bclass\s+\w+', code))
+
+        return False
+
+    def has_cpp(self, header):
+        cpp_name = header.replace(".h", ".cpp")
+
+        # 🔥 global über Projekt scannen
+        for path in self.scanner.header_index.values():
+            dir_path = os.path.dirname(path)
+
+            candidate = os.path.join(dir_path, cpp_name)
+            if os.path.exists(candidate):
+                return True
+
+        return False
