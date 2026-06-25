@@ -2,13 +2,14 @@ import os
 import re
 
 
-
 class HeaderScanner:
     def __init__(self, include_dirs, exclude_dirs=None):
         self.include_dirs = include_dirs
         self.exclude_dirs = exclude_dirs or []
         self.visited = set()
         self.header_index = {}
+        self.main_headers = []
+        self.dependency_graph = {}
 
         self._build_index()
 
@@ -147,7 +148,19 @@ class HeaderScanner:
         print(f"🔍 {header_path}")
 
         includes = self.extract_includes(header_path)
+        
+        valid_includes = []
+        for inc in includes:
+            base = os.path.basename(inc)
+            if base and base[0].isupper():
+                valid_includes.append(base)
+        
+        # Graph speichern
+        current_header = os.path.basename(header_path)
+        self.dependency_graph[current_header] = valid_includes
 
+
+        self.main_headers.append(includes)
         for inc in includes:
 
             # nur Header mit Großbuchstaben weiter verfolgen
@@ -168,18 +181,16 @@ class HeaderScanner:
     # -----------------------------------------
     def run(self, root_header, clear_visited=True):
         self.visited.clear()
-
+        self.main_headers = []
         if clear_visited:
             self.visited.clear()
         self.scan_recursive(root_header)
 
-        print("\n✅ Ergebnis:")
+        print("\n✅ Headers:")
         for h in self.visited:
             print(" -", h)
 
         return self.visited
 
-
-
-
-
+    def get_dependency_graph(self):
+            return self.dependency_graph
