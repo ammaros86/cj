@@ -196,5 +196,169 @@ Generiere jetzt den fertigen C++ Dateiinhalt:
         output_path = os.path.join("generate", f"{class_name}Test.cpp")
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(test_code)
+
+
+
+
+
+
+
+class_name = header.replace(".h", "").replace(".hpp", "")
+            
+            # 1. Prüfen, ob die Dateien bereits existieren und vollständig sind
+            files_exist, missing_methods = self.check_existing_files(class_name, usages)
+            
+            if files_exist and not missing_methods:
+                print(f"ℹ️ {class_name}: Dateien existieren bereits und sind up-to-date. Überspringe Generierung.")
+                result[header] = "USE_EXISTING"
+                continue # Keine AI-Entscheidung nötig, da alles da ist
+                
+            # Wenn Dateien existieren, aber Methoden fehlen -> Modus auf "UPDATE" setzen
+            is_update = files_exist and len(missing_methods) > 0
+
+            if self.use_ai_decision:
+                header_path = self.scanner.header_index.get(header)
+                decision = self.call_ollama_decision(header_path, cpp_file, usages, tree)
+                print(f"🤖 AI Entscheidung: {decision}")
+            else:
+                decision = self.ask_user_decision(header)
+
+            if decision == "INTERFACE_WRAPPER":
+                header_path = self.scanner.header_index.get(header)
+                
+                if is_update:
+                    print(f"\n🔄 Ollama aktualisiert Interfaces/Wrapper für {class_name} (Fehlende Methoden: {', '.join(missing_methods)})...\n")
+                    # Hole existierenden Code für den Prompt
+                    existing_code = self.get_existing_files_code(class_name)
+                    ai_result = self.call_ollama_update(header_path, missing_methods, existing_code)
+                else:
+                    print(f"\n🤖 Ollama generiert Interface + Wrapper neu für {class_name}...\n")
+                    ai_result = self.call_ollama(header_path, cpp_file, usages)
+
+                sections = self.parse_ai_output(ai_result)
+                self.save_generated_files(class_name, sections)
+                print("✅ Dateien gespeichert/aktualisiert")
+
+            result[header] = decision
+
+
+
+
+
+
+
+
+
+
+def check_existing_files(self, class_name, usages):
+        """
+        Prüft, ob Interface, Wrapper und Mock existieren und ob alle 
+        genutzten Methoden darin vorkommen.
+        """
+        base = "generate"
+        paths = [
+            os.path.join(base, "interfaces", f"I{class_name}.h"),
+            os.path.join(base, "wrappers", f"{class_name}Wrapper.h"),
+            os.path.join(base, "mocks", f"{class_name}Mock.h")
+        ]
+        
+        # Wenn eine der Dateien fehlt, müssen wir generieren
+        for p in paths:
+            if not os.path.exists(p):
+                return False, []
+        
+        # Methoden-Namen aus den Usages extrahieren (z.B. "Foo::bar" -> "bar")
+        method_names = set()
+        for u in usages:
+            # Einfacher Regex-Check, um potenzielle Methodennamen zu finden
+            matches = re.findall(rf'{class_name}::(\w+)', u)
+            for m in matches:
+                method_names.add(m)
+                
+        # Prüfe, ob die Methoden im existierenden Interface stehen
+        missing_methods = []
+        with open(paths[0], "r", encoding="utf-8") as f:
+            interface_content = f.read()
+            
+        for method in method_names:
+            # Wenn der Methodenname nicht im Interface-Code existiert
+            if method not in interface_content:
+                missing_methods.append(method)
+                
+        return True, missing_methods
+
+    def get_existing_files_code(self, class_name):
+        """Liest den aktuellen Code der 3 Dateien aus."""
+        base = "generate"
+        sections = {"interface": "", "wrapper": "", "mock": ""}
+        
+        p_int = os.path.join(base, "interfaces", f"I{class_name}.h")
+        p_wrap = os.path.join(base, "wrappers", f"{class_name}Wrapper.h")
+        p_mock = os.path.join(base, "mocks", f"{class_name}Mock.h")
+        
+        if os.path.exists(p_int):
+            with open(p_int, "r", encoding="utf-8") as f: sections["interface"] = f.read()
+        if os.path.exists(p_wrap):
+            with open(p_wrap, "r", encoding="utf-8") as f: sections["wrapper"] = f.read()
+        if os.path.exists(p_mock):
+            with open(p_mock, "r", encoding="utf-8") as f: sections["mock"] = f.read()
+            
+        return sections
+
+    def call_ollama_update(self, header_path, missing_methods, existing_code):
+        """Spezial-Prompt für Ollama, um bestehenden Code nur zu erweitern."""
+        url = self.ollama_url
+        header_code = ""
+        if os.path.exists(header_path):
+            with open(header_path, "r", encoding="utf-8", errors="ignore") as f:
+                header_code = f.read()
+
+        methods_text = ", ".join(missing_methods)
+        
+        prompt = f"""
+Du bist ein C++ Code-Refactoring Experte. 
+Es existieren bereits Interface-, Wrapper- und Mock-Dateien. Deine Aufgabe ist es AUSSCHLIESSLICH, diese um die fehlenden Methoden zu ERWEITERN. Verändere den bestehenden Code ansonsten nicht.
+
+Fehlende Methoden, die hinzugefügt werden MÜSSEN: {methods_text}
+
+Hier ist der aktuelle Header als Signatur-Referenz:
+{header_code}
+
+=====================
+EXISTIERENDER CODE
+=====================
+--- Aktuelles Interface ---
+{existing_code['interface']}
+
+--- Aktueller Wrapper ---
+{existing_code['wrapper']}
+
+--- Aktueller Mock ---
+{existing_code['mock']}
+
+=====================
+OUTPUT REGEL
+=====================
+Gib den kompletten, aktualisierten Code im bekannten Format aus (KEIN Markdown, KEINE Erklärungen):
+
+----- Interface (.h) -----
+<kompletter neuer Code inkl. alten und neuen Methoden>
+
+----- Wrapper (.h) -----
+<kompletter neuer Code inkl. alten und neuen Methoden>
+
+----- Mock (.h) -----
+<kompletter neuer Code inkl. alten und neuen Methoden>
+"""
+
+        response = requests.post(url, json={
+            "model": "gemma4:26b",
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": 0.1}
+        })
+        if response.status_code != 200:
+            return "❌ Fehler beim Update"
+        return response.json()["response"]
             
         print(f"✅ Test-Datei erfolgreich unter '{output_path}' gespeichert!")
