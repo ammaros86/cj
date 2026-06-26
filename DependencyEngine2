@@ -1,0 +1,657 @@
+import os
+import re
+import requests
+
+class DependencyEngine:
+    def __init__(self, scanner, include_dirs, use_ai_decision, ollama_url):
+        self.scanner = scanner
+        self.include_dirs = include_dirs
+        self.use_ai_decision = use_ai_decision
+        self.ollama_url = ollama_url
+
+    # -----------------------------------------
+    # ✅ Direct Includes (ROOT)
+    # -----------------------------------------
+    def get_direct_includes(self, root_header):
+
+        includes = self.scanner.extract_includes(root_header)
+
+        result = []
+        for inc in includes:
+            base = os.path.basename(inc)
+
+            if base and base[0].isupper():
+                result.append(base)
+
+        return result
+
+    # -----------------------------------------
+    # ✅ CPP exists
+    # -----------------------------------------
+    def has_cpp(self, header):
+        cpp_name = header.replace(".h", ".cpp")
+
+        for path in self.scanner.header_index.values():
+            directory = os.path.dirname(path)
+            candidate = os.path.join(directory, cpp_name)
+
+            if os.path.exists(candidate):
+                return True, candidate
+
+        return False, None
+
+    # -----------------------------------------
+    # ✅ Dependency Tree
+    # -----------------------------------------
+    def build_dependency_tree(self, header, visited=None):
+        if visited is None:
+            visited = set()
+
+        if header in visited:
+            return {}
+
+        visited.add(header)
+
+        path = self.scanner.header_index.get(header)
+        if not path:
+            return {}
+
+        includes = self.scanner.extract_includes(path)
+
+        tree = {}
+        for inc in includes:
+            base = os.path.basename(inc)
+
+            if base and base[0].isupper():
+                tree[base] = self.build_dependency_tree(base, visited)
+
+        return tree
+
+    # -----------------------------------------
+    # ✅ Pretty Print Baum + CPP INFO
+    # -----------------------------------------
+    def print_tree(self, tree, indent=0):
+        for key, sub in tree.items():
+            has_cpp, _ = self.has_cpp(key)
+
+            cpp_info = "CPP ✅" if has_cpp else "CPP ❌"
+            print(" " * indent + f"├─ {key} ({cpp_info})")
+
+            self.print_tree(sub, indent + 4)
+
+    # -----------------------------------------
+    # ✅ Usage Detection (WO wird es benutzt?)
+    # -----------------------------------------
+
+    # -----------------------------------------
+    # ✅ Usage Detection (NUR CPP FILE!)
+    # -----------------------------------------
+    def find_usages(self, header, cpp_file):
+        base = header.replace(".h", "")
+        usages = []
+
+        if not os.path.exists(cpp_file):
+            return usages
+
+        patterns = [
+            rf'{base}::\w+',
+            rf'new\s+{base}\b',
+            rf'\b{base}\s+\w+'
+        ]
+
+        with open(cpp_file, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+
+        for i, line in enumerate(lines):
+            for p in patterns:
+                if re.search(p, line, re.IGNORECASE):
+                    usages.append(
+                        f"[{os.path.basename(cpp_file)}:{i+1}] {line.strip()}"
+                    )
+                    break
+
+        return usages
+    # -----------------------------------------
+    # ✅ Singleton Detection
+    # -----------------------------------------
+    def detect_singletons(self, code, headers):
+        detected = set()
+
+        for header in headers:
+            base = header.replace(".h", "")
+            if re.search(rf'{base}::getInstance\s*\(\)', code):
+                detected.add(header)
+
+        return detected
+
+    # -----------------------------------------
+    # ✅ USER OUTPUT
+    # -----------------------------------------
+    def show_header_analysis(self, header, tree, usages, is_singleton):
+        print("\n===================================")
+        print(f"📦 HEADER: {header}")
+        print("===================================")
+
+        has_cpp, cpp_path = self.has_cpp(header)
+        print(f"\nCPP vorhanden: {'✅' if has_cpp else '❌'}")
+
+        # Abhängigkeiten
+        print("\nAbhängigkeiten (komplett):")
+        cpp_info = "CPP ✅" if has_cpp else "CPP ❌"
+        print(f"{header} ({cpp_info})")
+
+        self.print_tree(tree, 2)
+
+        # Usage anzeigen
+        print("\nVerwendung im Code:")
+
+        if usages:
+            for u in usages[:15]:  # limit für Übersicht
+                print(" ", u)
+        else:
+            print("  ❌ keine direkte Verwendung gefunden")
+
+        if is_singleton:
+            print("\n✅ Singleton erkannt → starke Empfehlung: Wrapper")
+
+    # -----------------------------------------
+    # ✅ USER DECISION
+    # -----------------------------------------
+    def ask_user_decision(self, header):
+        while True:
+            choice = input(
+                "\nOption wählen:\n"
+                "1 = Wrapper/Interface\n"
+                "2 = Original verwenden\n"
+                "3 = Fake\n"
+                "> "
+            )
+
+            if choice == "1":
+                return "INTERFACE_WRAPPER"
+            elif choice == "2":
+                return "USE_ORIGINAL"
+            elif choice == "3":
+                return "FAKE"
+
+    # -----------------------------------------
+    # ✅ RUN
+    # -----------------------------------------
+   # -----------------------------------------
+# ✅ RUN
+# -----------------------------------------
+    def run(self, root_header, cpp_file):
+        self.local_map = {}
+        result = {}
+        self.ensure_output_dirs()
+        headers = self.get_direct_includes(root_header)
+
+        # Nur für Singleton detection (ok)
+        code_all = ""
+
+        if os.path.exists(root_header):
+            with open(root_header, "r", encoding="utf-8", errors="ignore") as f:
+                code_all += f.read()
+
+        if os.path.exists(cpp_file):
+            with open(cpp_file, "r", encoding="utf-8", errors="ignore") as f:
+                code_all += f.read()
+
+        singletons = self.detect_singletons(code_all, headers)
+
+        print("\n🚀 Analyse startet...\n")
+        for header in headers:
+            tree = self.build_dependency_tree(header)
+
+            # ✅ NUR CPP FILE!
+            usages = self.find_usages(header, cpp_file)
+
+            self.show_header_analysis(
+                header,
+                tree,
+                usages,
+                header in singletons
+            )
+            if len(usages) == 0:
+                continue      #keine verwendung dann soll nichts erstellt
+           
+            if self.use_ai_decision :
+                header_path = self.scanner.header_index.get(header)
+               
+                decision = self.call_ollama_decision(header_path, cpp_file, usages, tree)
+                print(f"🤖 AI Entscheidung: {decision}")
+            else:
+                decision = self.ask_user_decision(header)
+
+            if decision == "INTERFACE_WRAPPER":
+                header_path = self.scanner.header_index.get(header)
+
+                print("\n🤖 Ollama generiert Interface + Wrapper...\n")
+                
+                ai_result = self.call_ollama(header_path, cpp_file, usages)
+
+                print("\n=== AI GENERATION ===\n")
+                print(ai_result)
+
+                class_name = header.replace(".h", "")
+
+                sections = self.parse_ai_output(ai_result)
+
+                self.save_generated_files(class_name, sections)
+
+                print("✅ Dateien gespeichert")
+
+
+            result[header] = decision
+
+        print("\n✅ Fertig!\n")
+        main_header = cpp_file.replace(".cpp", "h")
+        self.generate_test_file_with_ollama(main_header, cpp_file)
+
+        return {
+            "strategies": result,
+            "singletons": list(singletons)
+        }
+
+
+
+    def save_fake(self, class_name, code):
+        path = os.path.join("generate", "fakes", f"{class_name}Fake.h")
+        with open(path, "w") as f:
+            f.write(code)
+
+    def save_generated_files(self, class_name, sections):
+        base = "generate"
+
+        if sections["interface"].strip():
+            path = os.path.join(base, "interfaces", f"I{class_name}.h")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(sections["interface"])
+
+        if sections["wrapper"].strip():
+            path = os.path.join(base, "wrappers", f"{class_name}Wrapper.h")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(sections["wrapper"])
+
+        if sections["mock"].strip():
+            path = os.path.join(base, "mocks", f"{class_name}Mock.h")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(sections["mock"])
+
+
+
+    def parse_ai_output(self, text):
+        self.local_map = {}
+        sections = {
+            "interface": [],
+            "wrapper": [],
+            "mock": []
+        }
+
+        current = None
+
+        for line in text.splitlines():
+            stripped = line.strip()
+
+            # ✅ EXAKTE Matches (wichtig!)
+            if stripped.startswith("----- Interface"):
+                current = "interface"
+                continue
+
+            elif stripped.startswith("----- Wrapper"):
+                current = "wrapper"
+                continue
+
+            elif stripped.startswith("----- Mock"):
+                current = "mock"
+                continue
+
+            # ✅ ignorieren wenn keine Section aktiv
+            if current is None:
+                continue
+
+            # ✅ markdown entfernen
+            if stripped.startswith("```"):
+                continue
+
+            # ✅ HTML entities fix (wichtiger fix!)
+            line = line.replace("&lt;", "<").replace("&gt;", ">")
+
+            sections[current].append(line)
+
+        # ✅ join + clean
+        result = {}
+        for key in sections:
+            code = "\n".join(sections[key]).strip()
+            result[key] = code
+            self.local_map[key] = code
+
+        return result
+
+
+
+
+    def ensure_output_dirs(self):
+        base = "generate"
+
+        dirs = [
+            "interfaces",
+            "wrappers",
+            "mocks",
+            "fakes"
+        ]
+
+        for d in dirs:
+            path = os.path.join(base, d)
+            os.makedirs(path, exist_ok=True)
+
+
+
+    def call_ollama_decision(self, header_path, cpp_file, usages, dependencies):
+        url = self.ollama_url
+
+        header_code = ""
+        cpp_code = ""
+
+        if os.path.exists(header_path):
+            with open(header_path, "r", encoding="utf-8", errors="ignore") as f:
+                header_code = f.read()
+
+        if os.path.exists(cpp_file):
+            with open(cpp_file, "r", encoding="utf-8", errors="ignore") as f:
+                cpp_code = f.read()
+
+        usage_text = "\n".join(usages) if usages else "KEINE"
+        dependencies_text = "\n".join(dependencies.keys()) if dependencies else "KEINE"
+
+
+        prompt = f"""
+        Du bist ein C++ Test-Architektur Experte.
+
+        Deine Aufgabe ist es, zu entscheiden, wie eine Klasse für Unit-Tests behandelt werden soll.
+
+        =====================
+        ENTSCHEIDUNGEN
+        =====================
+
+        Du darfst NUR eine dieser Antworten zurückgeben:
+
+        INTERFACE_WRAPPER
+        USE_ORIGINAL
+        FAKE (Nur wenn es keine getInstance hat)
+
+        KEIN anderer Text erlaubt.
+
+        =====================
+        BEDEUTUNG
+        =====================
+
+        INTERFACE_WRAPPER:
+        - Wenn die Klasse schwer testbar ist
+        - z.B. viele Abhängigkeiten, externe Systeme, komplexe Logik
+        - Wenn Header Klasse mit new oder direkt instanziert in dem Implementierungslogik dem cpp
+
+        USE_ORIGINAL:
+        - Wenn die Klasse einfach ist
+        - wenig Abhängigkeiten
+        - gut direkt testbar
+
+        FAKE:
+        - Wenn einfache Simulation sinnvoll ist
+        - z.B. Datenklassen oder kleine Helper Klassen
+
+        =====================
+        INPUT ANALYSE
+        =====================
+
+        Berücksichtige:
+
+        1. HEADER → Struktur, Methoden, Komplexität  
+        2. CPP → Implementierungslogik  
+        3. ABHÄNGIGKEITEN → andere Klassen  
+        4. VERWENDUNG IM CODE → wie oft und wie die Klasse genutzt wird  
+
+        =====================
+        VERWENDUNG IM CODE:
+        {usage_text}
+
+        =====================
+        ABHÄNGIGKEITEN:
+        {dependencies_text}
+
+        =====================
+        HEADER:
+        {header_code}
+
+        =====================
+        CPP:
+        {cpp_code}
+
+        =====================
+        WICHTIG:
+        =====================
+
+        - Gib GENAU EIN Wort zurück:
+        INTERFACE_WRAPPER oder USE_ORIGINAL oder FAKE
+        - KEINE Erklärung
+        - KEINE Kommentare
+        - KEIN Format
+        - KEIN Code
+
+        """
+
+
+        response = requests.post(url, json={
+            "model": "gemma4:26b",
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0.1
+            }
+        })
+
+        if response.status_code != 200:
+            print("❌ Ollama Fehler")
+            return "USE_ORIGINAL"  # fallback
+
+        result = response.json()["response"].strip()
+
+        # ✅ Safety: nur erlaubte Werte
+        if result not in ["INTERFACE_WRAPPER", "USE_ORIGINAL", "FAKE"]:
+            print("⚠️ Ungültige AI Antwort:", result)
+            return "USE_ORIGINAL"
+
+        return result
+
+    def call_ollama(self, header_path, cpp_file, usages):
+        url = self.ollama_url
+
+        header_code = ""
+        cpp_code = ""
+
+        if os.path.exists(header_path):
+            with open(header_path, "r", encoding="utf-8", errors="ignore") as f:
+                header_code = f.read()
+
+        if os.path.exists(cpp_file):
+            with open(cpp_file, "r", encoding="utf-8", errors="ignore") as f:
+                cpp_code = f.read()
+
+        usage_text = "\n".join(usages) if usages else "KEINE"
+        prompt = f"""
+            Du bist ein C++ Code Generator.
+
+            Deine Aufgabe ist strikt definiert:
+
+            1. Analysiere den HEADER
+            2. Nutze AUSSCHLIESSLICH die Methoden, die unter "VERWENDUNG IM CODE" stehen
+
+            =====================
+            KRITISCHE REGEL
+            =====================
+
+            Du darfst NUR Methoden verwenden, die hier aufgeführt sind:
+
+            VERWENDUNG IM CODE:
+            {usage_text}
+
+            Extrahiere daraus die Methodennamen (z.B. Foo::bar → bar)
+
+            - KEINE anderen Methoden verwenden
+            - KEINE zusätzliche Methoden
+            - KEINE fehlenden Methoden
+
+            =====================
+            ZU GENERIEREN
+            =====================
+
+            1. Interface (I<ClassName>)
+            2. Wrapper
+            3. Mock (GoogleMock)
+
+            =====================
+            INTERFACE
+            =====================
+
+            - Nur die verwendeten Methoden
+            - Alle Methoden:
+            virtual ... = 0;
+            - Virtueller Destruktor
+            - KEINE Implementierung
+            - KEIN include vom Original Header
+
+            =====================
+            WRAPPER
+            =====================
+
+            - Include nur das Interface
+            - Global:
+            extern I<ClassName>* g_<classname>Interface;
+            - Alle Methoden:
+            inline
+            → Aufruf:
+                g_<classname>Interface->method(...)
+            - KEIN include vom Original Header oder CPP
+
+            =====================
+            MOCK
+            =====================
+
+            - Implementiert das Interface
+            - Nutzt:
+            MOCK_METHOD(ReturnType, MethodName, (Args), (override));
+
+            =====================
+            INCLUDES
+            =====================
+
+            - Alle Custom Types aus den Methoden MÜSSEN inkludiert werden
+            - Verwende passende Header basierend auf Typen
+            - KEIN Include des Original-Headers
+
+            =====================
+            OUTPUT REGEL
+            =====================
+
+            Gib GENAU das aus (kein Text!):
+
+            ----- Interface (.h) -----
+            <code>
+
+            ----- Wrapper (.h) -----
+            <code>
+
+            ----- Mock (.h) -----
+            <code>
+
+            
+            =====================
+            OUTPUT FORMAT (SEHR WICHTIG)
+            =====================
+
+            Gib den Code den ich direkt speichern können.
+            =====================
+            VERBOTEN
+            =====================
+
+            - KEINE ```cpp Blöcke
+            - KEINE ``` Zeichen
+          
+            - KEINE Erklärungen
+            - KEINE Kommentare außerhalb des Codes
+            - KEINE zusätzlichen Wörter
+
+
+            =====================
+            HEADER:
+            {header_code}
+
+            =====================
+            CPP:
+            {cpp_code}
+            """
+
+
+        response = requests.post(url, json={
+            "model": "gemma4:26b",
+            "prompt": prompt,
+            "stream": False
+        })
+
+        if response.status_code != 200:
+            return f"❌ API Fehler: {response.status_code}"
+
+        return response.json()["response"]
+    
+    def generate_test_file_with_ollama(self, header, cpp_file):
+        self.local_map = {}
+        if "interface" not in self.local_map or "wrapper" not in self.local_map:
+            print("🚫 Interface oder Wrapper fehlen! Erstelle diese zuerst.")
+            return
+        
+        header_path = self.scanner.header_index.get(header)
+        if not header_path or not os.path.exists(header_path):
+            print("🚫 Header-Datei nicht gefunden!")
+            return
+        
+        interface = self.local_map["interface"]
+        wrapper = self.local_map["wrapper"]
+        class_name = header.replace(".h", "")
+        
+        prompt = f"""
+            Du bist ein C++ Code Generator und Unit-Test Experte.
+            Deine Aufgabe ist, eine GoogleTest Fixture Klasse für die folgenden Eingaben zu generieren:
+            1. Interface: {interface}
+            2. Wrapper: {wrapper}
+            3. Klassenname: {class_name}
+            4. Header-Datei: {header_path}
+            =====================
+            OUTPUT REGEL
+            =====================
+            Gib GENAU das aus (kein Text!):
+            ----- TestFixture.h -----
+            <code>
+            =====================
+            OUTPUT FORMAT (SEHR WICHTIG)
+            =====================
+            Gib den Code im folgenden Format aus:
+            1. Zeilen mit "#include" für die Header-Dateien, einschließlich des Interfaces und des Wrappers.
+            2. Die GoogleTest Fixture Klasse muss von ::testing::Test erben.
+            3. In der SetUp-Methode soll ein Zeiger auf den Wrapper instanziiert werden (z.B. {class_name}Wrapper *wrapper = new {class_name}Wrapper();).
+            4. Alle Methoden der Fixture Klasse müssen inline sein, einschließlich SetUp, TearDown, und Test-Methoden.
+            5. Die Test-Methoden sollten den Namen "Test*XYZ*" haben (z.B. "TestMyFunctionality").
+            """
+        
+        response = requests.post(self.ollama_url, json={
+            "model": "gemma4:26b",
+            "prompt": prompt,
+            "stream": False
+        })
+        if response.status_code != 200:
+            print(f"🚫 Ollama-Fehler: {response.status_code}")
+            return
+        
+        code = response.json()["response"]
+        sections = self.parse_ai_output(code)
+        self.save_generated_files(class_name + "Test", sections)
+        print("✅ Test-Datei gespeichert")
