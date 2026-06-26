@@ -1,0 +1,47 @@
+import json
+
+from headerScan import HeaderScanner
+from DependencyEngine import DependencyEngine
+
+
+def load_config(path):
+    with open(path, "r") as f:
+        return json.load(f)
+
+
+def main():
+    config = load_config("config.json")
+
+    root_header = config["root_header"]
+    cpp_file = config["cpp_file"]
+    include_dirs = config["include_dirs"]
+    exclude_dirs = config["exclude_dirs"]
+    use_ai_decision = config["use_ai_decision"]
+    ollama_url = config["ollama_url"]
+    # -----------------------------------------
+    # 1. Header Scanner
+    # -----------------------------------------
+    scanner = HeaderScanner(include_dirs, exclude_dirs)
+    scanner.run(root_header)
+
+    # -----------------------------------------
+    # 2. Dependency Engine
+    # -----------------------------------------
+    engine = DependencyEngine(scanner, include_dirs, use_ai_decision, ollama_url)
+
+    result = engine.run(root_header, cpp_file)
+
+    # -----------------------------------------
+    # 3. Ausgabe
+    # -----------------------------------------
+    print("\n📦 Strategie pro Header:")
+    for header, strategy in result["strategies"].items():
+        print(f"{header} -> {strategy}")
+
+    print("\n🔍 Erkannte Singletons:")
+    for s in result["singletons"]:
+        print(f"{s}")
+
+
+if __name__ == "__main__":
+    main()
