@@ -1,0 +1,200 @@
+# -----------------------------------------
+    # ✅ RUN (Aktualisiert)
+    # -----------------------------------------
+    def run(self, root_header, cpp_file):
+        # local_map wird JETZT hier initialisiert, damit es über den gesamten Run hinweg speichert
+        self.local_map = {
+            "interfaces": [],
+            "wrappers": [],
+            "mocks": []
+        }
+        result = {}
+        self.ensure_output_dirs()
+        headers = self.get_direct_includes(root_header)
+
+        code_all = ""
+        if os.path.exists(root_header):
+            with open(root_header, "r", encoding="utf-8", errors="ignore") as f:
+                code_all += f.read()
+
+        if os.path.exists(cpp_file):
+            with open(cpp_file, "r", encoding="utf-8", errors="ignore") as f:
+                code_all += f.read()
+
+        singletons = self.detect_singletons(code_all, headers)
+
+        print("\n🚀 Analyse startet...\n")
+        for header in headers:
+            tree = self.build_dependency_tree(header)
+            usages = self.find_usages(header, cpp_file)
+
+            self.show_header_analysis(
+                header,
+                tree,
+                usages,
+                header in singletons
+            )
+            if len(usages) == 0:
+                continue      
+
+            if self.use_ai_decision:
+                header_path = self.scanner.header_index.get(header)
+                decision = self.call_ollama_decision(header_path, cpp_file, usages, tree)
+                print(f"🤖 AI Entscheidung: {decision}")
+            else:
+                decision = self.ask_user_decision(header)
+
+            if decision == "INTERFACE_WRAPPER":
+                header_path = self.scanner.header_index.get(header)
+                print("\n🤖 Ollama generiert Interface + Wrapper...\n")
+                
+                ai_result = self.call_ollama(header_path, cpp_file, usages)
+                print("\n=== AI GENERATION ===\n")
+
+                class_name = header.replace(".h", "")
+                sections = self.parse_ai_output(ai_result)
+                self.save_generated_files(class_name, sections)
+                print("✅ Dateien gespeichert")
+
+            result[header] = decision
+
+        print("\n✅ Abhängigkeiten verarbeitet. Generiere nun die Testklasse...\n")
+        main_header = cpp_file.replace(".cpp", ".h")
+        self.generate_test_file_with_ollama(main_header, cpp_file)
+
+        return {
+            "strategies": result,
+            "singletons": list(singletons)
+        }
+
+    # -----------------------------------------
+    # ✅ PARSE AI OUTPUT (Aktualisiert)
+    # -----------------------------------------
+    def parse_ai_output(self, text):
+        sections = {
+            "interface": [],
+            "wrapper": [],
+            "mock": []
+        }
+        current = None
+
+        for line in text.splitlines():
+            stripped = line.strip()
+
+            if stripped.startswith("----- Interface"):
+                current = "interface"
+                continue
+            elif stripped.startswith("----- Wrapper"):
+                current = "wrapper"
+                continue
+            elif stripped.startswith("----- Mock"):
+                current = "mock"
+                continue
+
+            if current is None:
+                continue
+            if stripped.startswith("```"):
+                continue
+
+            line = line.replace("&lt;", "<").replace("&gt;", ">")
+            sections[current].append(line)
+
+        result = {}
+        for key in sections:
+            code = "\n".join(sections[key]).strip()
+            result[key] = code
+
+        return result
+
+    # -----------------------------------------
+    # ✅ TEST GENERATION (Komplett überarbeitet)
+    # -----------------------------------------
+    def generate_test_file_with_ollama(self, header, cpp_file):
+        header_path = self.scanner.header_index.get(header)
+        class_name = os.path.basename(cpp_file).replace(".cpp", "")
+        
+        # Generiere eine Liste der Mock-Dateien, die inkludiert werden müssen
+        detected_mocks_includes = ""
+        pointer_declarations = ""
+        pointer_instantiations = ""
+        pointer_clears = ""
+        
+        # Wir sammeln alle Header, für die ein INTERFACE_WRAPPER gewählt wurde
+        for h, path in self.scanner.header_index.items():
+            base_dep = h.replace(".h", "").replace(".hpp", "")
+            # Verhindere, dass die zu testende Klasse selbst als Mock geladen wird
+            if base_dep == class_name:
+                continue
+            
+            # Überprüfen, ob wir die Abhängigkeit im CPP File nutzen
+            if self.find_usages(h, cpp_file):
+                detected_mocks_includes += f'#include "I{base_dep}.h"\n#include "{base_dep}Mock.h"\n'
+                # Passend zum Schema: g_<classname>Interface
+                var_name = f"g_{base_dep.lower()}Interface"
+                pointer_declarations += f"I{base_dep}* {var_name} = nullptr;\n"
+                pointer_instantiations += f"        {var_name} = new {base_dep}Mock();\n"
+                pointer_clears += f"        delete {var_name};\n        {var_name} = nullptr;\n"
+
+        prompt = f"""
+Du bist ein C++ Unit-Test Experte für GoogleTest.
+Deine Aufgabe ist es, eine komplette Test-Datei (.cpp) für die Klasse '{class_name}' zu schreiben.
+
+=====================
+STRIGENTE VORGABEN (OUTPUT FORMAT)
+=====================
+- Gib NUR den rohen C++ Code aus.
+- KEINE Markdown-Kürzel wie ```cpp oder ```.
+- KEINE Erklärungen, kein Text davor oder danach.
+
+=====================
+ARCHITEKTUR-STRUKTUR
+=====================
+1. INCLUDES:
+#include <gtest/gtest.h>
+#include "{os.path.basename(header)}"
+{detected_mocks_includes}
+
+2. GLOBALE POINTER (Wichtig für Wrapper-Anbindung):
+{pointer_declarations}
+
+3. GOOGLETEST FIXTURE:
+Klasse: {class_name}Test (erbt von ::testing::Test)
+- SetUp() Methode: Instanziiere alle Mocks auf den globalen Pointern:
+{pointer_instantiations}
+- TearDown() Methode: Speicher freigeben und auf nullptr setzen:
+{pointer_clears}
+
+4. TEST METHODE:
+Schreibe GENAU EINE Beispiel-Testmethode unter Verwendung des Makros TEST_F({class_name}Test, TestMyFunctionality) {{
+    // Hier die zu testende Klasse instantiieren und eine Methode aufrufen
+}}
+
+Generiere jetzt den fertigen C++ Dateiinhalt:
+"""
+        
+        response = requests.post(self.ollama_url, json={
+            "model": "gemma4:26b",
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0.1
+            }
+        })
+        
+        if response.status_code != 200:
+            print(f"🚫 Ollama-Fehler bei Testgenerierung: {response.status_code}")
+            return
+        
+        test_code = response.json()["response"].strip()
+        
+        # Bereinigung von versehentlichem Markdown der AI
+        if test_code.startswith("```"):
+            test_code = re.sub(r'^```[a-zA-Z]*\n', '', test_code)
+            test_code = re.sub(r'\n```$', '', test_code)
+
+        # Speichern der Test-Datei
+        output_path = os.path.join("generate", f"{class_name}Test.cpp")
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(test_code)
+            
+        print(f"✅ Test-Datei erfolgreich unter '{output_path}' gespeichert!")
